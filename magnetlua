@@ -1,185 +1,216 @@
 -- LocalScript | StarterPlayerScripts
--- Dash Magnet + Force Collisions | Rayfield UI
+-- Dash Magnet with Rayfield UI + Force Collisions Toggle
 
--- ========== SINGLE-INSTANCE GUARD ==========
-if getgenv and getgenv().DashMagnetLoaded then
-	warn("[Dash Magnet] Already loaded — skipping duplicate.")
-	return
-end
-if getgenv then getgenv().DashMagnetLoaded = true end
-
-local Players           = game:GetService("Players")
-local RunService        = game:GetService("RunService")
-local UserInputService  = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
 
---========================================================--
--- RAYFIELD LOADER
---========================================================--
-local Rayfield
-local SOURCES = {
-	"https://sirius.menu/rayfield",
-	"https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/main/source.lua",
-	"https://raw.githubusercontent.com/Footagesus/Rayfield/main/source.lua",
-}
+-- Load Rayfield
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
-if type(loadstring) ~= "function" then
-	error("[Dash Magnet] loadstring is disabled — use a proper executor.")
-end
-
-for _, url in ipairs(SOURCES) do
-	local ok, result = pcall(function()
-		local src = game:HttpGet(url, true)
-		assert(type(src) == "string" and #src > 100, "bad response")
-		return loadstring(src)()
-	end)
-	if ok and type(result) == "table" and result.CreateWindow then
-		Rayfield = result
-		print("[Dash Magnet] Rayfield loaded from: " .. url)
-		break
-	end
-	warn("[Dash Magnet] source failed: " .. url .. " | " .. tostring(result))
-end
-
-if not Rayfield then
-	error("[Dash Magnet] All Rayfield sources failed.")
-end
-
---========================================================--
--- WINDOW (redesigned)
---========================================================--
 local Window = Rayfield:CreateWindow({
 	Name = "Dash Magnet",
 	LoadingTitle = "Dash Magnet",
-	LoadingSubtitle = "Magnet • Collisions • Combat Utility",
+	LoadingSubtitle = "by you",
 	ConfigurationSaving = {
 		Enabled = true,
 		FolderName = "DashMagnet",
-		FileName = "Config",
+		FileName = "Config"
 	},
 	KeySystem = false,
 })
 
--- Icon IDs (Roblox asset IDs)
-local ICONS = {
-	Magnet   = "rbxassetid://7733722227",  -- magnet-ish
-	Combat   = "rbxassetid://7733715400",  -- sword
-	Physics  = "rbxassetid://7733960981",  -- gear
-	Info     = "rbxassetid://7733674394",  -- info circle
-	Settings = "rbxassetid://7733769102",  -- sliders
-}
+local MainTab = Window:CreateTab("Main", 4483362458)
+local SettingsTab = Window:CreateTab("Settings", 4483362458)
 
-local MainTab     = Window:CreateTab("Magnet",   ICONS.Magnet)
-local PhysicsTab  = Window:CreateTab("Physics",  ICONS.Physics)
-local InfoTab     = Window:CreateTab("Info",     ICONS.Info)
+-- ================== SETTINGS ==================
+local DASH_SPEED_THRESHOLD = 78
+local MAGNET_STRENGTH = 0.75
+local MAX_RANGE = 70
+local HIT_DISTANCE = 4.8
+local MIN_DASH_SPEED = 70
+local MIN_DASH_TIME = 0.09
+local DIRECTION_THRESHOLD = 0.55
+-- ==============================================
 
---========================================================--
--- SETTINGS
---========================================================--
-local DEFAULTS = {
-	DASH_SPEED_THRESHOLD = 78,
-	MAGNET_STRENGTH      = 0.75,
-	MAX_RANGE            = 70,
-	HIT_DISTANCE         = 4.8,
-	MIN_DASH_SPEED       = 70,
-	MIN_DASH_TIME        = 0.09,
-	DIRECTION_THRESHOLD  = 0.55,
-	TARGET_PART          = "Head",
-}
+local magnetEnabled = true
+local collisionsEnabled = true          -- New toggle
+local magnetConnection = nil
+local collisionConnection = nil
+local dashStartTime = 0
+local isMagnetActive = false
 
-local CONFIG = table.clone(DEFAULTS)
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local Humanoid = Character:WaitForChild("Humanoid")
+local Root = Character:WaitForChild("HumanoidRootPart")
 
-local state = {
-	magnetEnabled     = true,
-	collisionsEnabled = true,
-	magnetConn        = nil,
-	collisionConn     = nil,
-	dashStartTime     = 0,
-	isMagnetActive    = false,
-	lastToggle        = 0,
-}
+--======================================================
+-- UI Elements
+--======================================================
 
---========================================================--
--- CHARACTER REFS
---========================================================--
-local Character, Humanoid, Root
+MainTab:CreateToggle({
+	Name = "Enable Magnet",
+	CurrentValue = true,
+	Flag = "MagnetToggle",
+	Callback = function(Value)
+		magnetEnabled = Value
+		if not Value then
+			stopMagnet()
+		end
+	end,
+})
 
-local function bindCharacter(char)
-	Character = char
-	Humanoid  = char:WaitForChild("Humanoid", 10)
-	Root      = char:WaitForChild("HumanoidRootPart", 10)
-end
+MainTab:CreateToggle({
+	Name = "Force Collisions",
+	CurrentValue = true,
+	Flag = "CollisionsToggle",
+	Callback = function(Value)
+		collisionsEnabled = Value
+		if Value then
+			startCollisionEngine()
+		else
+			if collisionConnection then
+				collisionConnection:Disconnect()
+				collisionConnection = nil
+			end
+		end
+	end,
+})
 
-if LocalPlayer.Character then bindCharacter(LocalPlayer.Character) end
-LocalPlayer.CharacterAdded:Connect(bindCharacter)
+MainTab:CreateLabel("Press M to quick toggle Magnet")
 
---========================================================--
+SettingsTab:CreateSlider({
+	Name = "Magnet Strength",
+	Range = {0.3, 1},
+	Increment = 0.05,
+	CurrentValue = 0.75,
+	Flag = "Strength",
+	Callback = function(Value)
+		MAGNET_STRENGTH = Value
+	end,
+})
+
+SettingsTab:CreateSlider({
+	Name = "Dash Speed Threshold",
+	Range = {40, 120},
+	Increment = 1,
+	CurrentValue = 78,
+	Flag = "Threshold",
+	Callback = function(Value)
+		DASH_SPEED_THRESHOLD = Value
+	end,
+})
+
+SettingsTab:CreateSlider({
+	Name = "Max Range",
+	Range = {30, 120},
+	Increment = 5,
+	CurrentValue = 70,
+	Flag = "Range",
+	Callback = function(Value)
+		MAX_RANGE = Value
+	end,
+})
+
+SettingsTab:CreateSlider({
+	Name = "Hit Distance",
+	Range = {3, 8},
+	Increment = 0.1,
+	CurrentValue = 4.8,
+	Flag = "HitDist",
+	Callback = function(Value)
+		HIT_DISTANCE = Value
+	end,
+})
+
+--======================================================
 -- FORCE COLLISIONS
---========================================================--
+--======================================================
 local function forceCollisionsForCharacter(character)
 	for _, part in ipairs(character:GetDescendants()) do
 		if part:IsA("BasePart") then
-			local n = part.Name
-			local parent = part.Parent
-			if n ~= "Handle" and n ~= "Accessory" and parent
-				and not parent:IsA("Accessory") then
-				part.CanCollide = true
+			local name = part.Name
+			if name ~= "Handle" and name ~= "Accessory" and not part.Parent:IsA("Accessory") then
+				if not part.CanCollide then
+					part.CanCollide = true
+				end
 			end
 		end
 	end
 end
 
+local function setupPlayer(player)
+	if player == LocalPlayer then return end
+	player.CharacterAdded:Connect(function(character)
+		character:WaitForChild("HumanoidRootPart", 10)
+	end)
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+	setupPlayer(player)
+end
+Players.PlayerAdded:Connect(setupPlayer)
+
 local function startCollisionEngine()
-	if state.collisionConn then
-		state.collisionConn:Disconnect()
-		state.collisionConn = nil
+	if collisionConnection then
+		collisionConnection:Disconnect()
 	end
 
 	local counter = 0
-	state.collisionConn = RunService.Heartbeat:Connect(function()
-		if not state.collisionsEnabled then return end
-		counter += 1
+	collisionConnection = RunService.Heartbeat:Connect(function()
+		if not collisionsEnabled then return end
 
+		counter = counter + 1
 		if counter % 3 == 0 then
-			for _, p in ipairs(Players:GetPlayers()) do
-				if p ~= LocalPlayer and p.Character then
-					forceCollisionsForCharacter(p.Character)
+			for _, player in ipairs(Players:GetPlayers()) do
+				if player ~= LocalPlayer and player.Character then
+					forceCollisionsForCharacter(player.Character)
 				end
 			end
 		end
 
-		if Root and Root.Parent then
-			Root.ReceiveAge = 0
-			if Humanoid then Humanoid.PlatformStand = false end
+		local char = LocalPlayer.Character
+		if char then
+			local rootPart = char:FindFirstChild("HumanoidRootPart")
+			if rootPart then
+				pcall(function() rootPart.ReceiveAge = 0 end)
+			end
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			if hum then
+				pcall(function() hum.PlatformStand = false end)
+			end
 		end
 	end)
 end
 
 startCollisionEngine()
 
---========================================================--
--- MAGNET
---========================================================--
-local function getClosestTarget()
-	if not Root then return nil end
+task.spawn(function()
+	while true do
+		task.wait(1400)
+		if collisionsEnabled then
+			startCollisionEngine()
+		end
+	end
+end)
 
-	local closest, closestDist = nil, CONFIG.MAX_RANGE
-
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= LocalPlayer and p.Character then
-			local target
-			if CONFIG.TARGET_PART == "Head" then
-				target = p.Character:FindFirstChild("Head")
-			else
-				target = p.Character:FindFirstChild("HumanoidRootPart")
-					or p.Character:FindFirstChild("Torso")
-					or p.Character:FindFirstChild("UpperTorso")
-			end
+--======================================================
+-- MAGNET LOGIC
+--======================================================
+local function getClosestTorso()
+	local closest, closestDist = nil, MAX_RANGE
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer and player.Character then
+			local target = player.Character:FindFirstChild("HumanoidRootPart")
+				or player.Character:FindFirstChild("Torso")
+				or player.Character:FindFirstChild("UpperTorso")
 			if target then
-				local d = (Root.Position - target.Position).Magnitude
-				if d < closestDist then
-					closestDist, closest = d, target
+				local dist = (Root.Position - target.Position).Magnitude
+				if dist < closestDist then
+					closestDist = dist
+					closest = target
 				end
 			end
 		end
@@ -187,260 +218,85 @@ local function getClosestTarget()
 	return closest
 end
 
-local function stopMagnet()
-	if state.magnetConn then
-		state.magnetConn:Disconnect()
-		state.magnetConn = nil
-	end
-	state.isMagnetActive = false
-end
-
 local function startMagnet()
-	if state.isMagnetActive or not state.magnetEnabled then return end
-	if not Root or not Root.Parent or not Humanoid then return end
+	if isMagnetActive or not magnetEnabled then return end
+	isMagnetActive = true
 
-	state.isMagnetActive = true
+	magnetConnection = RunService.Heartbeat:Connect(function()
+		if not Root or not Root.Parent or not magnetEnabled then return end
 
-	state.magnetConn = RunService.Heartbeat:Connect(function()
-		if not Root or not Root.Parent or not state.magnetEnabled then
-			stopMagnet(); return
-		end
+		local target = getClosestTorso()
+		if target then
+			local direction = (target.Position - Root.Position).Unit
+			local desiredSpeed = math.max(Root.AssemblyLinearVelocity.Magnitude, MIN_DASH_SPEED)
+			local desiredVelocity = direction * desiredSpeed
 
-		local target = getClosestTarget()
-		if not target then return end
+			Root.AssemblyLinearVelocity = Root.AssemblyLinearVelocity:Lerp(desiredVelocity, MAGNET_STRENGTH)
 
-		local offset = target.Position - Root.Position
-		if offset.Magnitude <= 0.01 then return end
+			if Humanoid.FloorMaterial == Enum.Material.Air then
+				Root.AssemblyLinearVelocity = Root.AssemblyLinearVelocity:Lerp(desiredVelocity, 0.88)
+			end
 
-		local direction = offset.Unit
-		local currentVel = Root.AssemblyLinearVelocity
-		local desiredSpeed = math.max(currentVel.Magnitude, CONFIG.MIN_DASH_SPEED)
-		local desiredVel = direction * desiredSpeed
+			Root.CFrame = Root.CFrame:Lerp(CFrame.lookAt(Root.Position, target.Position), 0.25)
 
-		Root.AssemblyLinearVelocity = currentVel:Lerp(desiredVel, CONFIG.MAGNET_STRENGTH)
-
-		if Humanoid.FloorMaterial == Enum.Material.Air then
-			Root.AssemblyLinearVelocity = Root.AssemblyLinearVelocity:Lerp(desiredVel, 0.88)
-		end
-
-		Root.CFrame = Root.CFrame:Lerp(CFrame.lookAt(Root.Position, target.Position), 0.25)
-
-		if offset.Magnitude <= CONFIG.HIT_DISTANCE then
-			stopMagnet()
+			if (Root.Position - target.Position).Magnitude <= HIT_DISTANCE then
+				stopMagnet()
+			end
 		end
 	end)
 end
 
-RunService.Heartbeat:Connect(function()
-	if not Root or not Root.Parent or not state.magnetEnabled then return end
-
-	local vel = Root.AssemblyLinearVelocity
-	local speed = vel.Magnitude
-
-	if speed < 0.01 then
-		state.dashStartTime = 0
-		if state.isMagnetActive then stopMagnet() end
-		return
+function stopMagnet()
+	if magnetConnection then
+		magnetConnection:Disconnect()
+		magnetConnection = nil
 	end
+	isMagnetActive = false
+end
 
-	local movingForward = vel.Unit:Dot(Root.CFrame.LookVector) > CONFIG.DIRECTION_THRESHOLD
+RunService.Heartbeat:Connect(function()
+	if not Root or not Root.Parent or not magnetEnabled then return end
 
-	if speed >= CONFIG.DASH_SPEED_THRESHOLD and movingForward then
-		if state.dashStartTime == 0 then
-			state.dashStartTime = tick()
+	local velocity = Root.AssemblyLinearVelocity
+	local speed = velocity.Magnitude
+	local lookVector = Root.CFrame.LookVector
+	local movingForward = velocity.Unit:Dot(lookVector) > DIRECTION_THRESHOLD
+
+	if speed >= DASH_SPEED_THRESHOLD and movingForward then
+		if dashStartTime == 0 then
+			dashStartTime = tick()
 		end
-		if tick() - state.dashStartTime >= CONFIG.MIN_DASH_TIME
-			and not state.isMagnetActive then
+		if tick() - dashStartTime >= MIN_DASH_TIME and not isMagnetActive then
 			startMagnet()
 		end
 	else
-		state.dashStartTime = 0
-		if state.isMagnetActive then stopMagnet() end
+		dashStartTime = 0
+		if isMagnetActive then
+			stopMagnet()
+		end
 	end
 end)
 
---========================================================--
--- UI — MAGNET TAB
---========================================================--
-MainTab:CreateSection("Master Control")
-
-MainTab:CreateToggle({
-	Name = "Enable Dash Magnet",
-	CurrentValue = true,
-	Flag = "Magnet_Enabled",
-	Callback = function(v)
-		state.magnetEnabled = v
-		if not v then stopMagnet() end
-	end,
-})
-
-MainTab:CreateParagraph({
-	Title = "How it works",
-	Content = "While enabled, a fast forward dash within range will curve your velocity toward the nearest target. Toggle with M.",
-})
-
-MainTab:CreateSection("Targeting")
-
-MainTab:CreateDropdown({
-	Name = "Target Part",
-	Options = {"Head", "Torso"},
-	CurrentOption = {"Head"},
-	Flag = "Magnet_TargetPart",
-	Callback = function(opt) CONFIG.TARGET_PART = opt[1] end,
-})
-
-MainTab:CreateSlider({
-	Name = "Max Range (studs)",
-	Range = {30, 120}, Increment = 5, CurrentValue = 70,
-	Flag = "Magnet_Range",
-	Callback = function(v) CONFIG.MAX_RANGE = v end,
-})
-
-MainTab:CreateSlider({
-	Name = "Hit Distance (studs)",
-	Range = {3, 8}, Increment = 0.1, CurrentValue = 4.8,
-	Flag = "Magnet_HitDist",
-	Callback = function(v) CONFIG.HIT_DISTANCE = v end,
-})
-
-MainTab:CreateSection("Physics Tuning")
-
-MainTab:CreateSlider({
-	Name = "Magnet Strength",
-	Range = {0.3, 1}, Increment = 0.05, CurrentValue = 0.75,
-	Flag = "Magnet_Strength",
-	Callback = function(v) CONFIG.MAGNET_STRENGTH = v end,
-})
-
-MainTab:CreateSlider({
-	Name = "Dash Speed Threshold",
-	Range = {40, 120}, Increment = 1, CurrentValue = 78,
-	Flag = "Magnet_Threshold",
-	Callback = function(v) CONFIG.DASH_SPEED_THRESHOLD = v end,
-})
-
-MainTab:CreateSlider({
-	Name = "Min Dash Speed",
-	Range = {30, 150}, Increment = 5, CurrentValue = 70,
-	Flag = "Magnet_MinSpeed",
-	Callback = function(v) CONFIG.MIN_DASH_SPEED = v end,
-})
-
-MainTab:CreateSlider({
-	Name = "Direction Threshold",
-	Range = {0, 1}, Increment = 0.05, CurrentValue = 0.55,
-	Flag = "Magnet_DirThresh",
-	Callback = function(v) CONFIG.DIRECTION_THRESHOLD = v end,
-})
-
-MainTab:CreateSlider({
-	Name = "Min Dash Time (s)",
-	Range = {0, 0.5}, Increment = 0.01, CurrentValue = 0.09,
-	Flag = "Magnet_MinTime",
-	Callback = function(v) CONFIG.MIN_DASH_TIME = v end,
-})
-
---========================================================--
--- UI — PHYSICS TAB
---========================================================--
-PhysicsTab:CreateSection("Collision Engine")
-
-PhysicsTab:CreateToggle({
-	Name = "Force Collisions",
-	CurrentValue = true,
-	Flag = "Collision_Enabled",
-	Callback = function(v)
-		state.collisionsEnabled = v
-		if v then
-			startCollisionEngine()
-		elseif state.collisionConn then
-			state.collisionConn:Disconnect()
-			state.collisionConn = nil
-		end
-	end,
-})
-
-PhysicsTab:CreateParagraph({
-	Title = "What this does",
-	Content = "Continuously re-enables CanCollide on other players' body parts so you collide with them mid-dash. Also stabilizes your own character against soft-locks (ReceiveAge / PlatformStand).",
-})
-
-PhysicsTab:CreateSection("Danger Zone")
-
-PhysicsTab:CreateButton({
-	Name = "Reset All Settings to Defaults",
-	Callback = function()
-		CONFIG = table.clone(DEFAULTS)
-		Rayfield:Notify({
-			Title = "Dash Magnet",
-			Content = "Settings reset. Reload the script to apply to UI sliders.",
-			Duration = 4,
-		})
-	end,
-})
-
---========================================================--
--- UI — INFO TAB
---========================================================--
-InfoTab:CreateSection("Keybinds")
-
-InfoTab:CreateParagraph({
-	Title = "M — Toggle Magnet",
-	Content = "Quick-toggle the magnet on or off without opening the menu.",
-})
-
-InfoTab:CreateSection("About")
-
-InfoTab:CreateParagraph({
-	Title = "Dash Magnet",
-	Content = "A dash-curving utility that redirects your forward momentum toward the nearest player when you're moving fast enough.",
-})
-
-InfoTab:CreateParagraph({
-	Title = "Tips",
-	Content = "If the magnet never triggers, lower 'Dash Speed Threshold'. If it triggers at the wrong moment, raise it. 'Direction Threshold' controls how strictly you must be facing the target.",
-})
-
-InfoTab:CreateButton({
-	Name = "Rejoin Server",
-	Callback = function()
-		game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
-	end,
-})
-
---========================================================--
--- KEYBIND
---========================================================--
+-- Keybind
 UserInputService.InputBegan:Connect(function(input, gp)
 	if gp then return end
-	if input.KeyCode ~= Enum.KeyCode.M then return end
-
-	local now = tick()
-	if now - state.lastToggle < 0.2 then return end
-	state.lastToggle = now
-
-	state.magnetEnabled = not state.magnetEnabled
-	if not state.magnetEnabled then stopMagnet() end
-
-	Rayfield:Notify({
-		Title = "Dash Magnet",
-		Content = state.magnetEnabled and "Magnet Enabled" or "Magnet Disabled",
-		Duration = 2,
-	})
+	if input.KeyCode == Enum.KeyCode.M then
+		magnetEnabled = not magnetEnabled
+		Rayfield:Notify({
+			Title = "Dash Magnet",
+			Content = magnetEnabled and "Enabled" or "Disabled",
+			Duration = 2,
+		})
+	end
 end)
 
---========================================================--
--- RESPAWN
---========================================================--
-LocalPlayer.CharacterAdded:Connect(function()
+-- Respawn
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+	Character = newChar
+	Humanoid = newChar:WaitForChild("Humanoid")
+	Root = newChar:WaitForChild("HumanoidRootPart")
 	stopMagnet()
-	state.dashStartTime = 0
+	dashStartTime = 0
 end)
 
-Rayfield:Notify({
-	Title = "Dash Magnet",
-	Content = "Loaded successfully.",
-	Duration = 3,
-})
-
-print("[Dash Magnet] loaded — Magnet + Collisions")
+print("Dash Magnet + Rayfield + Collisions Toggle loaded")
